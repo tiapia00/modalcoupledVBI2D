@@ -11,19 +11,20 @@ import vehicle
 from beam import Beam
 from load_els import LoadElement, LoadSystem
 import fem_utils
-from comparison_utils import get_err, interpolate_mat
+from data_utils import get_err, interpolate_mat, get_fft
 from profile import generate_harmonic_profile
 from solver import solve_system, get_fade_weights
 import modal
 
 abaqus_cmd = r"C:\SIMULIA\Commands\abaqus.bat"
+verify_mat = False
 
 g = 9.81
 
 ## Input
 
 # Vehicle data
-vel = 20
+vel = 10
 
 l_veh = 2
 h_veh = 0.5
@@ -37,7 +38,7 @@ Iz = 1/12*m_carriage*(l_veh**2 + h_veh**2)
 I = [Iz]
 
 cs = np.array([[0, 0], [0, 0]])
-ks = np.array([[2e5, 2e5], [2e3, 2e3]]) # Spring stiffnesses
+ks = np.array([[2e4, 2e4], [2e3, 2e3]]) # Spring stiffnesses
 ks_last = ks[-1]
 cs_last = cs[-1]
 num_axles = ks.shape[1]
@@ -365,51 +366,56 @@ plt.legend()
 plt.show()
 
 # Verification
-dict_matlab = loadmat('VerificationVBI.mat')
-U2_mat = dict_matlab['U_xt'].squeeze()
-t_mat = dict_matlab['t_ver'].squeeze()
-F_contact_mat = dict_matlab['F_contact'].squeeze()
-midnode = dict_matlab['node_midspan'].item()
-U2mid_mat = U2_mat[midnode]
-x_v_mat = dict_matlab['U_veh'].squeeze()
+if verify_mat:
+    dict_matlab = loadmat('VerificationVBI.mat')
+    U2_mat = dict_matlab['U_xt'].squeeze()
+    t_mat = dict_matlab['t_ver'].squeeze()
+    F_contact_mat = dict_matlab['F_contact'].squeeze()
+    midnode = dict_matlab['node_midspan'].item()
+    U2mid_mat = U2_mat[midnode]
+    x_v_mat = dict_matlab['U_veh'].squeeze()
 
-U2mid_mat = interpolate_mat(t_mat, U2mid_mat, time)
-err = get_err(U2mid_mat, U2_mid)
-logging.info(f'ERROR MATLAB - U2 MIDSPAN = {err}')
+    U2mid_mat = interpolate_mat(t_mat, U2mid_mat, time)
+    err = get_err(U2mid_mat, U2_mid)
+    logging.info(f'ERROR MATLAB - U2 MIDSPAN = {err}')
 
-plt.figure()
-plt.plot(time, U2mid_mat, label='Matlab')
-plt.plot(time, U2_mid, label='Python')
-plt.xlabel(r'$t$')
-plt.ylabel(r'$U_2$')
-plt.legend()
-plt.title('Midspan displacement verification')
-plt.show()
+    plt.figure()
+    plt.plot(time, U2mid_mat, label='Matlab')
+    plt.plot(time, U2_mid, label='Python')
+    plt.xlabel(r'$t$')
+    plt.ylabel(r'$U_2$')
+    plt.legend()
+    plt.title('Midspan displacement verification')
+    plt.show()
 
-x_v_mat = interpolate_mat(t_mat, x_v_mat, time)
-err = get_err(x_v, x_v_mat)
-logging.info(f'ERROR MATLAB - VEHICLE = {err}')
-plt.figure()
-if len(x_v_mat.shape) != 1:
-    x_v_mat = x_v_mat[dofv]
-plt.plot(time, x_v_mat, label='Matlab')
-plt.plot(time, x_v[dofv], label='Python')
-plt.xlabel(r'$t$')
-plt.ylabel(r'$x_v$')
-plt.title('Vehicle displacement verification')
-plt.legend()
-plt.show()
+    x_v_mat = interpolate_mat(t_mat, x_v_mat, time)
+    err = get_err(x_v, x_v_mat)
+    logging.info(f'ERROR MATLAB - VEHICLE = {err}')
+    plt.figure()
+    if len(x_v_mat.shape) != 1:
+        x_v_mat = x_v_mat[dofv]
+    plt.plot(time, x_v_mat, label='Matlab')
+    plt.plot(time, x_v[dofv], label='Python')
+    plt.xlabel(r'$t$')
+    plt.ylabel(r'$x_v$')
+    plt.title('Vehicle displacement verification')
+    plt.legend()
+    plt.show()
 
-# Contact force
-F_contact_mat = interpolate_mat(t_mat, F_contact_mat[idx_axle_plot], time)
-err = get_err(F_contact_mat, force_contact[idx_axle_plot])
-logging.info(f'ERROR MATLAB - CONTACT FORCE = {err}')
+    # Contact force
+    F_contact_mat = interpolate_mat(t_mat, F_contact_mat[idx_axle_plot], time)
+    err = get_err(F_contact_mat, force_contact[idx_axle_plot])
+    logging.info(f'ERROR MATLAB - CONTACT FORCE = {err}')
 
-plt.figure()
-plt.plot(time, F_contact_mat, label='Matlab')
-plt.plot(time, force_contact[idx_axle_plot], label='Python')
-plt.xlabel(r'$t$')
-plt.ylabel(r'$F$')
-plt.title('Contact force verification')
-plt.legend()
-plt.show()
+    plt.figure()
+    plt.plot(time, F_contact_mat, label='Matlab')
+    plt.plot(time, force_contact[idx_axle_plot], label='Python')
+    plt.xlabel(r'$t$')
+    plt.ylabel(r'$F$')
+    plt.title('Contact force verification')
+    plt.legend()
+    plt.show()
+
+## Data analysis
+mask=~np.isnan(force_contact[idx_axle_plot])
+get_fft(time[mask], y[mask])
