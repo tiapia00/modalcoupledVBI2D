@@ -37,7 +37,7 @@ Iz = 1/12*m_carriage*(l_veh**2 + h_veh**2)
 I = [Iz]
 
 cs = np.array([[0, 0], [0, 0]])
-ks = np.array([[2e6, 2e6], [2e5, 2e5]]) # Spring stiffnesses
+ks = np.array([[2e5, 2e5], [2e3, 2e3]]) # Spring stiffnesses
 ks_last = ks[-1]
 cs_last = cs[-1]
 num_axles = ks.shape[1]
@@ -120,7 +120,7 @@ logging.info(f'Analysis started with {n_modes_b} modes')
 
 xc0 = np.array([0] + [-l_veh] * (num_axles - 1))
 T = (np.max(x)+np.max(np.abs(xc0)))/vel
-fmax = 20000
+fmax = 10000
 dt = 1/fmax
 time = np.arange(0, T, dt)
 n_steps = len(time)
@@ -198,8 +198,12 @@ for i in range(1, n_steps):
     cs_contact = cs_last[idx_inside]
 
     ramp_duration = 3*dt
-    apply_fade = True
+    apply_fade = False
+
     fade_weights = get_fade_weights(ramp_duration, apply_fade, idx_inside, xc0, vel, t, length_b)
+
+    if not apply_fade:
+        fade_weights[:] = 1
 
     r_c = r_interp(x_c)
     dr_dx_c = dr_dx_interp(x_c)
@@ -292,6 +296,7 @@ for i in range(1, n_steps):
     fsi_contact += - mass_per_axle*g
     force_contact[:,i] = fsi_contact
 
+# Plots
 idx_axle_plot = 1
 logging.info('ERRORS')
 plt.figure()
@@ -359,7 +364,7 @@ plt.title('Midspan displacement')
 plt.legend()
 plt.show()
 
-## Verification
+# Verification
 dict_matlab = loadmat('VerificationVBI.mat')
 U2_mat = dict_matlab['U_xt'].squeeze()
 t_mat = dict_matlab['t_ver'].squeeze()
@@ -368,7 +373,6 @@ midnode = dict_matlab['node_midspan'].item()
 U2mid_mat = U2_mat[midnode]
 x_v_mat = dict_matlab['U_veh'].squeeze()
 
-# Midpoint displacement
 U2mid_mat = interpolate_mat(t_mat, U2mid_mat, time)
 err = get_err(U2mid_mat, U2_mid)
 logging.info(f'ERROR MATLAB - U2 MIDSPAN = {err}')
@@ -376,7 +380,6 @@ logging.info(f'ERROR MATLAB - U2 MIDSPAN = {err}')
 plt.figure()
 plt.plot(time, U2mid_mat, label='Matlab')
 plt.plot(time, U2_mid, label='Python')
-#plt.plot(time, U2_mid, label='Python - BKEUL')
 plt.xlabel(r'$t$')
 plt.ylabel(r'$U_2$')
 plt.legend()

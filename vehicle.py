@@ -90,16 +90,19 @@ def quarter_car_pitch(ms: np.ndarray, I: list, cs: np.ndarray, ks: np.ndarray, l
     for i in range(n):
         K_v[0, i+1] = -ks[0,i]
         K_v[i+1, 0] = -ks[0,i]
-        K_v[i+1, i+1] = ks[0,i] + ks[1,i]
+        K_v[i+1, i+1] = ks[0,i]
+        K_v[i+1, i+1] += ks[1,i]
 
     C_v = np.zeros_like(M_v)
     C_v[0,0] = np.sum(cs[0])
     for i in range(n):
         C_v[0, i+1] = -cs[0,i]
         C_v[i+1, 0] = -cs[0,i]
-        C_v[i+1, i+1] = cs[0,i] + cs[1,i]
+        C_v[i+1, i+1] = cs[0,i]
+        C_v[i+1, i+1] += cs[1,i]
 
     # contributions due to pitch of the vehicle, linearized wrt to theta=0
+    # theta is the last dof
     K_v[0,-1] = ks[0,0]*l_veh/2 - ks[0,1]*l_veh/2
     K_v[1,-1] = -ks[0,0]*l_veh/2
     K_v[2,-1] = ks[0,1] * l_veh/2
