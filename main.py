@@ -13,6 +13,7 @@ from load_els import LoadElement, LoadSystem
 import fem_utils
 from comparison_utils import get_err, interpolate_mat
 from profile import generate_harmonic_profile
+from solver import solve_system, get_fade_weights
 import modal
 
 abaqus_cmd = r"C:\SIMULIA\Commands\abaqus.bat"
@@ -180,120 +181,6 @@ def get_contact_car(U2modes_contact, yb: np.ndarray, x_v: np.ndarray, r_c: np.nd
     f = ks_contact * (x_v - U2_contact - r_c)
     return f
 
-def solve_system(U0: np.ndarray,
-                 dotU0: np.ndarray,
-                 ddotU0: np.ndarray,
-                 r_c: np.ndarray,
-                 dr_dx_c: np.ndarray,
-                 dof_inside,
-                 fade_weights: np.ndarray):
-
-    yb0 = U0[:n_modes_b]
-    xv0 = U0[n_modes_b:]
-
-    dotyb0 = dotU0[:n_modes_b]
-    dotxv0 = dotU0[n_modes_b:]
-
-    ddotyb0 = ddotU0[:n_modes_b]
-    ddotxv0 = ddotU0[n_modes_b:]
-
-    K_extbridge = np.zeros((n_modes_b, n_modes_b))
-    for i in range(len(dof_inside)):
-        K_extbridge += ks_contact[i] * U2modes_contact[i].reshape(-1,1) @ U2modes_contact[i].reshape(1,-1)
-
-    C_extbridge = np.zeros((n_modes_b, n_modes_b))
-    for i in range(len(dof_inside)):
-        C_extbridge += cs_contact[i] * U2modes_contact[i].reshape(-1,1) @ U2modes_contact[i].reshape(1,-1)
-
-    Kb = np.diag(circ_freqs**2) + K_extbridge
-    Mb = np.eye(n_modes_b)
-    Cb = alphaR*np.eye(n_modes_b) + betaR*np.diag(circ_freqs**2)
-    Kbb = Kb + 2/dt*(Cb + C_extbridge) + 4/dt**2*Mb
-
-    Kbv = np.zeros((n_modes_b, n_modes_v))
-    # broadcasting
-    Kbv[:,dof_inside] += -(U2modes_contact * ks_contact.reshape(-1,1)).T
-    Kbv[:,dof_inside] += -2/dt*(U2modes_contact * cs_contact.reshape(-1,1)).T
-
-    Kvb = np.zeros((n_modes_v, n_modes_b))
-    Kvb[dof_inside,:] += -ks_contact.reshape(-1,1) * U2modes_contact
-    Kvb[dof_inside,:] += -2/dt * cs_contact.reshape(-1,1) * U2modes_contact
-    Kvv =  Kv + 2/dt*Cv + 4/dt**2*Mv
-
-    Keff = np.block([
-            [Kbb, Kbv],
-            [Kvb, Kvv]
-    ])
-
-    mass_per_axle = ms[1+idx_inside] + m_carriage/num_axles
-
-    fb = np.zeros(n_modes_b)
-
-    # === Apply fade ONLY to gravity ===
-    gravity_term = -(mass_per_axle * g * fade_weights).reshape(-1, 1)
-    fb += np.sum(U2modes_contact * gravity_term, axis=0)
-
-    # === No fade on spring/damper terms ===
-    spring_damper_term = (ks_contact * r_c + cs_contact * vel * dr_dx_c).reshape(-1,1)
-    fb += -np.sum(U2modes_contact * spring_damper_term, axis=0)
-
-    fbM = (4/dt**2*yb0 + 4/dt * dotyb0 + ddotyb0)
-    fbM = fbM.reshape(-1,1)
-    fb += (Mb @ fbM).squeeze()
-
-    fbC = 2/dt*yb0 + dotyb0 + dt/2 * ddotyb0
-    fbC = fbC.reshape(-1,1)
-    fb += (Cb @ fbC).squeeze()
-    # contribution to feff related to dashpot - bridge on bridge
-    fb += (C_extbridge @
-            (2/dt*yb0 + dotyb0 + dt/2 * ddotyb0).reshape(-1,1)).squeeze()
-    # contribution to feff related to dashpot - vehicle on bridge
-    fb += -((U2modes_contact * cs_contact.reshape(-1,1)).T @ (
-            2/dt * xv0[dof_inside] + dotxv0[dof_inside] + dt/2 * ddotxv0[dof_inside]).reshape(-1,1)).squeeze()
-
-    fv = np.zeros(n_modes_v)
-    fv[idx_inside] += ks_contact * r_c + cs_contact * vel * dr_dx_c
-    fvM = (4/dt**2*xv0 + 4/dt * dotxv0 + ddotxv0)
-    fvM = fvM.reshape(-1,1)
-    fv += (Mv @ fvM).squeeze()
-
-    fvC = 2/dt*xv0 + dotxv0 + dt/2 * ddotxv0
-    fvC = fvC.reshape(-1,1)
-    fv += (Cv @ fvC).squeeze()
-    # contribution to feff related to dashpot - bridge on vehicle
-    fv[dof_inside] += -((U2modes_contact * cs_contact.reshape(-1,1)) @ (
-            2/dt*yb0 + dotyb0 + dt/2 * ddotyb0).reshape(-1,1)).squeeze()
-
-    feff = np.concatenate((fb, fv))
-
-    U = np.linalg.solve(Keff, feff)
-
-    ddotU = 4/dt**2*(U - U0) - 4/dt*dotU0 - ddotU0
-    dotU = dotU0 + dt/2*(ddotU0 + ddotU)
-
-    return U, dotU, ddotU
-
-def get_fade_weights(ramp_duration, apply_fade: bool) -> np.ndarray:
-    fade_weights = np.ones_like(ks_contact)
-
-    if apply_fade:
-        for j, axle_idx in enumerate(idx_inside):
-            t_entry = (0 - xc0[axle_idx]) / vel
-            t_exit  = (length_b - xc0[axle_idx]) / vel
-
-            t_rel_entry = t - t_entry
-            t_rel_exit = t_exit - t
-
-            # Fade in
-            if 0 <= t_rel_entry <= ramp_duration:
-                fade_weights[j] = 0.5 * (1 - np.cos(np.pi * t_rel_entry / ramp_duration))
-
-            # Fade out
-            elif 0 <= t_rel_exit <= ramp_duration:
-                fade_weights[j] = 0.5 * (1 - np.cos(np.pi * t_rel_exit / ramp_duration))
-
-    return fade_weights
-
 U = np.zeros(n_modes_b + n_modes_v)
 dotU = np.zeros_like(U)
 ddotU = np.zeros_like(U)
@@ -312,7 +199,7 @@ for i in range(1, n_steps):
 
     ramp_duration = 3*dt
     apply_fade = True
-    fade_weights = get_fade_weights(ramp_duration, apply_fade)
+    fade_weights = get_fade_weights(ramp_duration, apply_fade, idx_inside, xc0, vel, t, length_b)
 
     r_c = r_interp(x_c)
     dr_dx_c = dr_dx_interp(x_c)
@@ -323,7 +210,55 @@ for i in range(1, n_steps):
 
     U2modes_contact = U2modes_interp(x_c).reshape(len(dof_inside),-1)
 
-    U, dotU, ddotU = solve_system(U0, dotU0, ddotU0, r_c, dr_dx_c, idx_inside, fade_weights)
+    config = {
+        "n_modes_b": n_modes_b,
+        "n_modes_v": n_modes_v,
+
+        "U2modes_contact": U2modes_contact,  # shape: (num_contact_dofs, n_modes_b)
+
+        # Contact parameters (per axle)
+        "ks_contact": ks_contact,            # shape: (num_contact_dofs,)
+        "cs_contact": cs_contact,            # shape: (num_contact_dofs,)
+
+        # Vehicle matrices
+        "Mv": Mv,                            # shape: (n_modes_v, n_modes_v)
+        "Cv": Cv,                            # shape: (n_modes_v, n_modes_v)
+        "Kv": Kv,                            # shape: (n_modes_v, n_modes_v)
+
+        # Bridge modal properties
+        "circ_freqs": circ_freqs,           # shape: (n_modes_b,)
+
+        # Rayleigh damping parameters
+        "alphaR": alphaR,
+        "betaR": betaR,
+
+        # Mass information
+        "ms": ms,                            # shape: (n_vehicle_dofs,)
+        "m_carriage": m_carriage,
+        "num_axles": num_axles,
+
+        # Contact state (which axles are on bridge)
+        "idx_inside": idx_inside,           # shape: (num_contact_dofs,)
+
+        # Vehicle velocity
+        "vel": vel,                          # scalar or array per axle (depending on your implementation)
+
+        # Gravity and time step
+        "g": g,
+        "dt": dt,
+
+        # Local roughness data
+        "r_c": r_c,
+        "dr_dx_c": dr_dx_c,
+
+        # interaction vehicle dofs
+        "dof_inside": dof_inside,
+
+        # fade data
+        "fade_weights": fade_weights
+    }
+
+    U, dotU, ddotU = solve_system(U0, dotU0, ddotU0, config)
 
     ybt = U[:n_modes_b]
     ydot_bt = dotU[:n_modes_b]
