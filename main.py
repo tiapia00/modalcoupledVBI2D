@@ -2,29 +2,27 @@ import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.io import loadmat
 from scipy.interpolate import interp1d
-from scipy.linalg import eigh
 import matplotlib.pyplot as plt
-import pandas as pd
 import logging
 
-import vehicle
+from vehicle import VehicleModel
 from beam import Beam
 from load_els import LoadElement, LoadSystem
 import fem_utils
 from data_utils import get_err, interpolate_mat, get_fft
-from profile import generate_harmonic_profile
+from bridge_profile import generate_harmonic_profile
 from solver import solve_system, get_fade_weights
 import modal
 
 abaqus_cmd = r"C:\SIMULIA\Commands\abaqus.bat"
-verify_mat = False
+verify_mat = True
 
 g = 9.81
 
 ## Input
 
 # Vehicle data
-vel = 10
+vel = 2
 
 l_veh = 2
 h_veh = 0.5
@@ -35,7 +33,7 @@ ms = np.array([m_carriage] + m_axles) # Vehicle weights
 mtot = sum(ms)
 
 Iz = 1/12*m_carriage*(l_veh**2 + h_veh**2)
-I = [Iz]
+J_rot = [Iz]
 
 cs = np.array([[0, 0], [0, 0]])
 ks = np.array([[2e4, 2e4], [2e3, 2e3]]) # Spring stiffnesses
@@ -43,30 +41,19 @@ ks_last = ks[-1]
 cs_last = cs[-1]
 num_axles = ks.shape[1]
 
-#matrices = vehicle_models.quarter_car(ms, cs, ks)
-matrices = vehicle.quarter_car_pitch(ms, I, cs, ks, l_veh)
-Mv, Cv, Kv = matrices
-n_modes_v = Mv.shape[0]
-f_ext_v = -g * np.insert(ms, 0, 0)
-xv_eq = np.linalg.solve(Kv, f_ext_v)
-
-try:
-    eigenvals_v, modes_v = eigh(Kv, Mv)
-except ValueError as e:
-    raise RuntimeError(f'Error computing eigenvalues: {e}')
-
-if np.any(eigenvals_v<0):
-    raise ValueError('Negative eigenvalue of car: system not stable')
-
-wn_v = np.sqrt(eigenvals_v)
-vehicle.plot_modes(modes_v, wn_v, xv_eq, l_veh)
+vehicle = VehicleModel(ms, cs, ks, l_veh, J_rot, include_pitch=True)
+vehicle.plot_modes()
+print(vehicle.modes)
+n_dof_vehicle = vehicle.M.shape[0]
+wn_v = np.sqrt(vehicle.eigenvals)
+np.savetxt('vehicle_freqs.txt', wn_v, fmt='%.3f')
 
 # configuration for moving load
-vehs = []
-vehs.append(LoadElement(np.array(m_axles), m_carriage, np.array([l_veh])))
-load_configuration = LoadSystem(vehs, np.array([]))
+loads = []
+loads.append(LoadElement(np.array(m_axles), m_carriage, np.array([l_veh])))
+load_configuration = LoadSystem(loads, np.array([]))
 
-startdofcontact = len(I) + 1
+startdofcontact = len(J_rot) + 1
 
 # Beam data
 length_b = 25
@@ -78,7 +65,6 @@ J = h**3*b/12
 damping_ratios = [0, 0]
 
 omega = np.pi * vel/length_b
-print(omega)
 
 n_modes_b = 30
 
@@ -115,7 +101,12 @@ logging.info(f"\n{separator}")
 
 # 1. Load data
 U2_modes, freqs = modal.get_modes(E, J, mu, x, n_modes_b, from_FEM)
-circ_freqs = 2 * np.pi * freqs
+wn_b = 2 * np.pi * freqs
+
+with open('bridge_freqs.txt', 'w') as file:
+    file.write(f"Omega_v: {omega:.3f}\n\n")
+    for freq in wn_b:
+        file.write(f"{freq:.3f}\n")
 
 logging.info(f'Analysis started with {n_modes_b} modes')
 
@@ -133,7 +124,7 @@ y_b = np.zeros((n_steps, n_modes_b))
 y_b_dot = np.zeros((n_steps, n_modes_b))
 
 # Lagrangian variables for vehicle
-x_v = np.zeros((n_modes_v, time.shape[0]))
+x_v = np.zeros((n_dof_vehicle, time.shape[0]))
 xdot_v = np.zeros_like(x_v)
 xddot_v = np.zeros_like(x_v)
 
@@ -142,8 +133,6 @@ U2modes_interp = CubicSpline(x, U2_modes, axis=0)
 # y_b and y_b_dot: modal coordinates
 y_b = np.zeros((n_steps, n_modes_b))
 y_b_dot = np.zeros((n_steps, n_modes_b))
-
-I = np.eye(n_modes_b)
 
 force_contact = np.empty((num_axles, len(time)))
 force_contact[:] = np.nan
@@ -156,7 +145,7 @@ f0_spatial = 2*wn_v[0]/(2*np.pi)/vel
 r_interp = generate_harmonic_profile(np.max(x), len(x), f0_spatial, 0)
 dr_dx_interp = r_interp.derivative()
 
-alphaR, betaR = modal.get_rayleigh_pars(circ_freqs, damping_ratios)
+alphaR, betaR = modal.get_rayleigh_pars(wn_b, damping_ratios)
 betaR = 0
 
 nx_beam = 400
@@ -182,7 +171,7 @@ def get_contact_car(U2modes_contact, yb: np.ndarray, x_v: np.ndarray, r_c: np.nd
     f = ks_contact * (x_v - U2_contact - r_c)
     return f
 
-U = np.zeros(n_modes_b + n_modes_v)
+U = np.zeros(n_modes_b + n_dof_vehicle)
 dotU = np.zeros_like(U)
 ddotU = np.zeros_like(U)
 
@@ -217,7 +206,7 @@ for i in range(1, n_steps):
 
     config = {
         "n_modes_b": n_modes_b,
-        "n_modes_v": n_modes_v,
+        "n_modes_v": n_dof_vehicle,
 
         "U2modes_contact": U2modes_contact,  # shape: (num_contact_dofs, n_modes_b)
 
@@ -226,12 +215,12 @@ for i in range(1, n_steps):
         "cs_contact": cs_contact,            # shape: (num_contact_dofs,)
 
         # Vehicle matrices
-        "Mv": Mv,                            # shape: (n_modes_v, n_modes_v)
-        "Cv": Cv,                            # shape: (n_modes_v, n_modes_v)
-        "Kv": Kv,                            # shape: (n_modes_v, n_modes_v)
+        "Mv": vehicle.M,                            # shape: (n_modes_v, n_modes_v)
+        "Cv": vehicle.C,                            # shape: (n_modes_v, n_modes_v)
+        "Kv": vehicle.K,                            # shape: (n_modes_v, n_modes_v)
 
         # Bridge modal properties
-        "circ_freqs": circ_freqs,           # shape: (n_modes_b,)
+        "wn_b": wn_b,           # shape: (n_modes_b,)
 
         # Rayleigh damping parameters
         "alphaR": alphaR,
@@ -308,7 +297,9 @@ plt.ylabel(r'$F_c$')
 plt.title('Contact force')
 plt.show()
 
-dofv = 3
+dofv = 1
+dofv_matlab = 0
+
 plt.figure('Vehicle')
 plt.subplot(3,1,1)
 plt.plot(time, x_v[dofv])
@@ -393,7 +384,7 @@ if verify_mat:
     logging.info(f'ERROR MATLAB - VEHICLE = {err}')
     plt.figure()
     if len(x_v_mat.shape) != 1:
-        x_v_mat = x_v_mat[dofv]
+        x_v_mat = x_v_mat[dofv_matlab]
     plt.plot(time, x_v_mat, label='Matlab')
     plt.plot(time, x_v[dofv], label='Python')
     plt.xlabel(r'$t$')
@@ -417,5 +408,10 @@ if verify_mat:
     plt.show()
 
 ## Data analysis
+"""
 mask=~np.isnan(force_contact[idx_axle_plot])
 get_fft(time[mask], y[mask])
+"""
+get_fft(time, xddot_v[dofv], f'FFT acceleration DOF {dofv}')
+get_fft(time, x_v[dofv], f'FFT displacement DOF {dofv}')
+

@@ -41,7 +41,7 @@ def solve_system(U0: np.ndarray,
     Cv = config["Cv"]
     Mv = config["Mv"]
 
-    circ_freqs = config["circ_freqs"]
+    wn_b = config["wn_b"]
 
     alphaR = config["alphaR"]
     betaR = config["betaR"]
@@ -82,9 +82,9 @@ def solve_system(U0: np.ndarray,
     for i in range(len(dof_inside)):
         C_extbridge += cs_contact[i] * U2modes_contact[i].reshape(-1,1) @ U2modes_contact[i].reshape(1,-1)
 
-    Kb = np.diag(circ_freqs**2) + K_extbridge
+    Kb = np.diag(wn_b**2) + K_extbridge
     Mb = np.eye(n_modes_b)
-    Cb = alphaR*np.eye(n_modes_b) + betaR*np.diag(circ_freqs**2)
+    Cb = alphaR*np.eye(n_modes_b) + betaR*np.diag(wn_b**2)
     Kbb = Kb + 2/dt*(Cb + C_extbridge) + 4/dt**2*Mb
 
     Kbv = np.zeros((n_modes_b, n_modes_v))

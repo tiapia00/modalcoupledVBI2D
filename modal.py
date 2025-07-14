@@ -24,7 +24,7 @@ def get_modes(E: float, J: float, mu: float, x: np.ndarray, n_modes_b: int, from
     return U2_modes, freqs
 
 
-def get_rayleigh_pars(circ_freqs: np.ndarray, damping_ratios: np.ndarray):
+def get_rayleigh_pars(circ_freqs: np.ndarray, damping_ratios: list):
     if len(damping_ratios) != 2:
         raise ValueError(f"Expected 2 damping ratios, got {len(damping_ratios)}.")
 
