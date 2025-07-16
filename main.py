@@ -31,7 +31,10 @@ m_carriage = 3e3
 m_axles = [3e2, 3e2]
 ms = np.array([m_carriage] + m_axles) # Vehicle weights
 mtot = sum(ms)
-mw = np.array([0, 0])
+mw = np.array([0, 0, 0])
+
+if len(mw) != len(m_axles):
+    raise ValueError("Length of mw must be equal to length of m_axles")
 
 Iz = 1/12*m_carriage*(l_veh**2 + h_veh**2)
 J_rot = [Iz]
