@@ -1,5 +1,7 @@
 import numpy as np
 
+import modal
+
 
 def get_fade_weights(ramp_duration, apply_fade: bool, idx_inside: np.ndarray, xc0: np.ndarray, vel: float, t: float, length_b: float) -> np.ndarray:
     fade_weights = np.ones_like(idx_inside)
@@ -49,6 +51,7 @@ def solve_system(U0: np.ndarray,
     ms = config["ms"]
     m_carriage = config["m_carriage"]
     num_axles = config["num_axles"]
+    mw = config['mw']
 
     idx_inside = config["idx_inside"]
 
@@ -75,15 +78,17 @@ def solve_system(U0: np.ndarray,
     ddotxv0 = ddotU0[n_modes_b:]
 
     K_extbridge = np.zeros((n_modes_b, n_modes_b))
-    for i in range(len(dof_inside)):
-        K_extbridge += ks_contact[i] * U2modes_contact[i].reshape(-1,1) @ U2modes_contact[i].reshape(1,-1)
-
     C_extbridge = np.zeros((n_modes_b, n_modes_b))
+    M_modalw = np.zeros((n_modes_b, n_modes_b))
+
     for i in range(len(dof_inside)):
-        C_extbridge += cs_contact[i] * U2modes_contact[i].reshape(-1,1) @ U2modes_contact[i].reshape(1,-1)
+        modal_trans_matrix = U2modes_contact[i].reshape(-1,1) @ U2modes_contact[i].reshape(1,-1)
+        K_extbridge += ks_contact[i] * modal_trans_matrix
+        C_extbridge += cs_contact[i] * modal_trans_matrix
+        M_modalw += mw[i] * modal_trans_matrix
 
     Kb = np.diag(wn_b**2) + K_extbridge
-    Mb = np.eye(n_modes_b)
+    Mb = np.eye(n_modes_b) + M_modalw
     Cb = alphaR*np.eye(n_modes_b) + betaR*np.diag(wn_b**2)
     Kbb = Kb + 2/dt*(Cb + C_extbridge) + 4/dt**2*Mb
 
@@ -102,7 +107,7 @@ def solve_system(U0: np.ndarray,
             [Kvb, Kvv]
     ])
 
-    mass_per_axle = ms[1+idx_inside] + m_carriage/num_axles
+    mass_per_axle = ms[1+idx_inside] + m_carriage/num_axles + mw[idx_inside]
 
     fb = np.zeros(n_modes_b)
 

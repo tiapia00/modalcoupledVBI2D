@@ -31,6 +31,7 @@ m_carriage = 3e3
 m_axles = [3e2, 3e2]
 ms = np.array([m_carriage] + m_axles) # Vehicle weights
 mtot = sum(ms)
+mw = np.array([0, 0])
 
 Iz = 1/12*m_carriage*(l_veh**2 + h_veh**2)
 J_rot = [Iz]
@@ -229,6 +230,7 @@ for i in range(1, n_steps):
         "ms": ms,                            # shape: (n_vehicle_dofs,)
         "m_carriage": m_carriage,
         "num_axles": num_axles,
+        "mw": mw,
 
         # Contact state (which axles are on bridge)
         "idx_inside": idx_inside,           # shape: (num_contact_dofs,)
