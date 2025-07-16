@@ -15,14 +15,14 @@ from solver import solve_system, get_fade_weights
 import modal
 
 abaqus_cmd = r"C:\SIMULIA\Commands\abaqus.bat"
-verify_mat = True
+verify_mat = False
 
 g = 9.81
 
 ## Input
 
 # Vehicle data
-vel = 2
+vel = 20
 
 l_veh = 2
 h_veh = 0.5
@@ -43,7 +43,7 @@ num_axles = ks.shape[1]
 
 vehicle = VehicleModel(ms, cs, ks, l_veh, J_rot, include_pitch=True)
 vehicle.plot_modes()
-print(vehicle.modes)
+vehicle.plot_TF(50, 1)
 n_dof_vehicle = vehicle.M.shape[0]
 wn_v = np.sqrt(vehicle.eigenvals)
 np.savetxt('vehicle_freqs.txt', wn_v, fmt='%.3f')
@@ -57,16 +57,16 @@ startdofcontact = len(J_rot) + 1
 
 # Beam data
 length_b = 25
-mu = 1000
+mu = 3000
 E = 3.1e10
 h = 3
 b = 11
 J = h**3*b/12
-damping_ratios = [0, 0]
+damping_ratios = [0.01, 1e-5]
 
 omega = np.pi * vel/length_b
 
-n_modes_b = 30
+n_modes_b = 2
 
 # Abaqus parameters
 num_nodes = 1001
@@ -112,7 +112,7 @@ logging.info(f'Analysis started with {n_modes_b} modes')
 
 xc0 = np.array([0] + [-l_veh] * (num_axles - 1))
 T = (np.max(x)+np.max(np.abs(xc0)))/vel
-fmax = 10000
+fmax = 2000
 dt = 1/fmax
 time = np.arange(0, T, dt)
 n_steps = len(time)
@@ -146,7 +146,6 @@ r_interp = generate_harmonic_profile(np.max(x), len(x), f0_spatial, 0)
 dr_dx_interp = r_interp.derivative()
 
 alphaR, betaR = modal.get_rayleigh_pars(wn_b, damping_ratios)
-betaR = 0
 
 nx_beam = 400
 nt_beam = 500
@@ -346,7 +345,8 @@ U2_mid = U2[U2.shape[0]//2]
 
 diff_noint_int = get_err(U2_noint_mid, U2_mid)
 logging.info(f'DIFF INT_NOINT = {diff_noint_int}')
-plt.figure()
+
+plt.figure(dpi=300)
 plt.plot(time, U2_mid, label='interaction')
 plt.plot(time, U2_noint_mid, label='no interaction')
 plt.xlabel(r'$t$')
@@ -357,6 +357,11 @@ plt.legend()
 plt.show()
 
 # Verification
+
+# exclude eventual nans from contact force
+mask=~np.isnan(force_contact[idx_axle_plot])
+x_v = x_v[dofv]
+
 if verify_mat:
     dict_matlab = loadmat('VerificationVBI.mat')
     U2_mat = dict_matlab['U_xt'].squeeze()
@@ -380,22 +385,22 @@ if verify_mat:
     plt.show()
 
     x_v_mat = interpolate_mat(t_mat, x_v_mat, time)
+    x_v_mat = x_v_mat[dofv_matlab]
+
     err = get_err(x_v, x_v_mat)
     logging.info(f'ERROR MATLAB - VEHICLE = {err}')
     plt.figure()
-    if len(x_v_mat.shape) != 1:
-        x_v_mat = x_v_mat[dofv_matlab]
     plt.plot(time, x_v_mat, label='Matlab')
-    plt.plot(time, x_v[dofv], label='Python')
+    plt.plot(time, x_v, label='Python')
     plt.xlabel(r'$t$')
     plt.ylabel(r'$x_v$')
-    plt.title('Vehicle displacement verification')
+    plt.title(f'DOF {dofv} displacement verification')
     plt.legend()
     plt.show()
 
     # Contact force
     F_contact_mat = interpolate_mat(t_mat, F_contact_mat[idx_axle_plot], time)
-    err = get_err(F_contact_mat, force_contact[idx_axle_plot])
+    err = get_err(F_contact_mat[mask], force_contact[idx_axle_plot, mask])
     logging.info(f'ERROR MATLAB - CONTACT FORCE = {err}')
 
     plt.figure()
@@ -408,10 +413,6 @@ if verify_mat:
     plt.show()
 
 ## Data analysis
-"""
-mask=~np.isnan(force_contact[idx_axle_plot])
-get_fft(time[mask], y[mask])
-"""
+get_fft(time[mask], y[mask], f'FFT contact force axle {idx_axle_plot}')
 get_fft(time, xddot_v[dofv], f'FFT acceleration DOF {dofv}')
-get_fft(time, x_v[dofv], f'FFT displacement DOF {dofv}')
-
+get_fft(time, x_v, f'FFT displacement DOF {dofv}')

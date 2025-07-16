@@ -158,7 +158,6 @@ class VehicleModel:
 
 
     def _get_modes(self):
-
         try:
             eigenvals, modes = eigh(self.K, self.M)
         except ValueError as e:
@@ -168,6 +167,35 @@ class VehicleModel:
             raise ValueError('Negative eigenvalue of car: system not stable')
 
         return (eigenvals, modes)
+
+
+    def _get_TF(self, w_max: float, dof: int):
+        omega = np.linspace(0, w_max, 10000)
+
+        # Allocate transfer function magnitude
+        H1 = []
+
+        e1 = np.zeros(self.M.shape[0])
+        e1[dof] = 1
+
+        for w in omega:
+            # Dynamic stiffness matrix
+            Z = -w**2 * self.M + 1j * w * self.C + self.K
+            H = np.linalg.inv(Z)
+            # make sense to sum just if inputs are in phase
+            H1.append(np.sum(np.abs(H[dof,2:])))  # |H_11(omega)|
+
+        return omega, H1
+
+    def plot_TF(self, w_max: float, dof: int):
+        omega, H1 = self._get_TF(w_max, dof)
+
+        plt.figure()
+        plt.semilogy(omega, H1)
+        plt.xlabel(r'$\Omega$')
+        plt.ylabel(r'$|H1(ω)|$ [m/N]')
+        plt.title(f'TF DOF {dof}')
+        plt.savefig('figs/dispTF_vehicle', dpi=300)
 
 
     def plot_modes(self):
