@@ -11,11 +11,14 @@ from load_els import LoadElement, LoadSystem
 import fem_utils
 from data_utils import get_err, interpolate_mat, get_fft
 from bridge_profile import generate_harmonic_profile
-from solver import solve_system, get_fade_weights
+from solver import NewmarkSolver
 import modal
 
 abaqus_cmd = r"C:\SIMULIA\Commands\abaqus.bat"
 verify_mat = False
+
+alphaN = 0.3025
+deltaN = 0.6
 
 g = 9.81
 
@@ -29,9 +32,9 @@ h_veh = 0.5
 
 m_carriage = 3e3
 m_axles = [3e2, 3e2]
+mw = np.array([0, 0])
 ms = np.array([m_carriage] + m_axles) # Vehicle weights
 mtot = sum(ms)
-mw = np.array([0, 0, 0])
 
 if len(mw) != len(m_axles):
     raise ValueError("Length of mw must be equal to length of m_axles")
@@ -45,7 +48,7 @@ ks_last = ks[-1]
 cs_last = cs[-1]
 num_axles = ks.shape[1]
 
-vehicle = VehicleModel(ms, cs, ks, l_veh, J_rot, include_pitch=True)
+vehicle = VehicleModel(ms, mw, cs, ks, l_veh, J_rot, include_pitch=True)
 vehicle.plot_modes()
 vehicle.plot_TF(50, 1)
 n_dof_vehicle = vehicle.M.shape[0]
@@ -56,8 +59,7 @@ np.savetxt('vehicle_freqs.txt', wn_v, fmt='%.3f')
 loads = []
 loads.append(LoadElement(np.array(m_axles), m_carriage, np.array([l_veh])))
 load_configuration = LoadSystem(loads, np.array([]))
-
-startdofcontact = len(J_rot) + 1
+startdofcontact = vehicle.dof_contact_start
 
 # Beam data
 length_b = 25
@@ -66,11 +68,11 @@ E = 3.1e10
 h = 3
 b = 11
 J = h**3*b/12
-damping_ratios = [0.01, 1e-5]
+damping_ratios = [0.0, 0.0]
 
 omega = np.pi * vel/length_b
 
-n_modes_b = 2
+n_modes_b = 10
 
 # Abaqus parameters
 num_nodes = 1001
@@ -178,6 +180,14 @@ U = np.zeros(n_modes_b + n_dof_vehicle)
 dotU = np.zeros_like(U)
 ddotU = np.zeros_like(U)
 
+vehicle_matrs = vehicle.build_matrices()
+Mb = np.eye(n_modes_b)
+Kb = wn_b**2 * Mb
+Cb = alphaR * Mb + betaR * Kb
+
+bridge_matrs = (Kb, Cb, Mb)
+solver = NewmarkSolver(1/4, 1/2, dt, vehicle_matrs, num_axles, bridge_matrs)
+
 for i in range(1, n_steps):
     t = time[i]
 
@@ -193,13 +203,7 @@ for i in range(1, n_steps):
     ramp_duration = 3*dt
     apply_fade = False
 
-    fade_weights = get_fade_weights(ramp_duration, apply_fade, idx_inside, xc0, vel, t, length_b)
-
-    if not apply_fade:
-        fade_weights[:] = 1
-
     r_c = r_interp(x_c)
-    dr_dx_c = dr_dx_interp(x_c)
 
     U0 = U
     dotU0 = dotU
@@ -209,54 +213,14 @@ for i in range(1, n_steps):
 
     config = {
         "n_modes_b": n_modes_b,
-        "n_modes_v": n_dof_vehicle,
 
         "U2modes_contact": U2modes_contact,  # shape: (num_contact_dofs, n_modes_b)
 
-        # Contact parameters (per axle)
-        "ks_contact": ks_contact,            # shape: (num_contact_dofs,)
-        "cs_contact": cs_contact,            # shape: (num_contact_dofs,)
-
-        # Vehicle matrices
-        "Mv": vehicle.M,                            # shape: (n_modes_v, n_modes_v)
-        "Cv": vehicle.C,                            # shape: (n_modes_v, n_modes_v)
-        "Kv": vehicle.K,                            # shape: (n_modes_v, n_modes_v)
-
-        # Bridge modal properties
-        "wn_b": wn_b,           # shape: (n_modes_b,)
-
-        # Rayleigh damping parameters
-        "alphaR": alphaR,
-        "betaR": betaR,
-
-        # Mass information
-        "ms": ms,                            # shape: (n_vehicle_dofs,)
-        "m_carriage": m_carriage,
-        "num_axles": num_axles,
-        "mw": mw,
-
-        # Contact state (which axles are on bridge)
-        "idx_inside": idx_inside,           # shape: (num_contact_dofs,)
-
-        # Vehicle velocity
-        "vel": vel,                          # scalar or array per axle (depending on your implementation)
-
-        # Gravity and time step
-        "g": g,
-        "dt": dt,
-
-        # Local roughness data
-        "r_c": r_c,
-        "dr_dx_c": dr_dx_c,
-
         # interaction vehicle dofs
-        "dof_inside": dof_inside,
-
-        # fade data
-        "fade_weights": fade_weights
+        "dof_inside": dof_inside
     }
 
-    U, dotU, ddotU = solve_system(U0, dotU0, ddotU0, config)
+    U, dotU, ddotU = solver.solve_system(U0, dotU0, ddotU0, config)
 
     ybt = U[:n_modes_b]
     ydot_bt = dotU[:n_modes_b]
@@ -281,6 +245,7 @@ for i in range(1, n_steps):
     y_b[i] = ybt
     y_b_dot[i] = ydot_bt
 
+    """
     fsi_contact = np.empty(num_axles)
     fsi_contact[:] = np.nan
     fsi_contact[idx_inside] = get_contact_car(U2modes_contact, ybt, xv_t[dof_inside], r_c)
@@ -289,6 +254,7 @@ for i in range(1, n_steps):
 
     fsi_contact += - mass_per_axle*g
     force_contact[:,i] = fsi_contact
+    """
 
 # Plots
 idx_axle_plot = 1

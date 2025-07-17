@@ -3,8 +3,9 @@ from scipy.linalg import eigh
 import matplotlib.pyplot as plt
 
 class VehicleModel:
-    def __init__(self, ms, cs, ks, l_veh, J_rot, include_pitch=False):
+    def __init__(self, ms, mw, cs, ks, l_veh, J_rot, include_pitch=False):
         self.ms = np.asarray(ms)
+        self.mw = np.asarray(mw)
         self.cs = np.asarray(cs)
         self.ks = np.asarray(ks)
         self.n_axles = len(ms) - 1
@@ -12,7 +13,7 @@ class VehicleModel:
         self.J_rot = J_rot
         self.include_pitch = include_pitch
 
-        self.M, self.C, self.K = self.build_matrices()
+        self.K, self.C, self.M = self.build_matrices()
         self.dof_labels = self.get_dof_labels()
         self.dof_map = {label: i for i, label in enumerate(self.dof_labels)}
 
@@ -75,7 +76,7 @@ class VehicleModel:
             C_v[i+1, 0] = -self.cs[0,i]
             C_v[i+1, i+1] = self.cs[0,i] + self.cs[1,i]
 
-        return (M_v, C_v, K_v)
+        return (K_v, C_v, M_v)
 
 
     def _build_pitch_model(self):
@@ -110,56 +111,88 @@ class VehicleModel:
                        Ground / Deck
         """
 
-        M_v = np.diag(np.concatenate((self.ms, self.J_rot)))
+        # build matrices related to free vehicle dofs
+        M_ff = np.diag(np.concatenate((self.ms, self.J_rot)))
         n = self.ms.shape[0] - 1
 
-        K_v = np.zeros_like(M_v)
-        K_v[0,0] = np.sum(self.ks[0])
+        K_ff = np.zeros_like(M_ff)
+        K_ff[0,0] = np.sum(self.ks[0])
         for i in range(n):
-            K_v[0, i+1] = -self.ks[0,i]
-            K_v[i+1, 0] = -self.ks[0,i]
-            K_v[i+1, i+1] = self.ks[0,i]
-            K_v[i+1, i+1] += self.ks[1,i]
+            K_ff[0, i+1] = -self.ks[0,i]
+            K_ff[i+1, 0] = -self.ks[0,i]
+            K_ff[i+1, i+1] = self.ks[0,i]
+            K_ff[i+1, i+1] += self.ks[1,i]
 
-        C_v = np.zeros_like(M_v)
-        C_v[0,0] = np.sum(self.cs[0])
+        C_ff = np.zeros_like(M_ff)
+        C_ff[0,0] = np.sum(self.cs[0])
         for i in range(n):
-            C_v[0, i+1] = -self.cs[0,i]
-            C_v[i+1, 0] = -self.cs[0,i]
-            C_v[i+1, i+1] = self.cs[0,i]
-            C_v[i+1, i+1] += self.cs[1,i]
+            C_ff[0, i+1] = -self.cs[0,i]
+            C_ff[i+1, 0] = -self.cs[0,i]
+            C_ff[i+1, i+1] = self.cs[0,i]
+            C_ff[i+1, i+1] += self.cs[1,i]
 
         # contributions due to pitch of the vehicle, linearized wrt to theta=0
-        # theta is the last dof
-        K_v[0,-1] = self.ks[0,0]*self.l_veh/2 - self.ks[0,1]*self.l_veh/2
-        K_v[1,-1] = -self.ks[0,0]*self.l_veh/2
-        K_v[2,-1] = self.ks[0,1] * self.l_veh/2
-        K_v[-1, 0] = self.ks[0,0]*self.l_veh/2 - self.ks[0,1]*self.l_veh/2
-        K_v[-1, 1] = -self.ks[0,0]*self.l_veh/2
-        K_v[-1, 2] = self.ks[0,1]*self.l_veh/2
-        K_v[-1, -1] = (self.ks[0,0] + self.ks[0,1]) * (self.l_veh**2) / 4
+        K_ff[0,-1] = self.ks[0,0]*self.l_veh/2 - self.ks[0,1]*self.l_veh/2
+        K_ff[1,-1] = -self.ks[0,0]*self.l_veh/2
+        K_ff[2,-1] = self.ks[0,1] * self.l_veh/2
+        K_ff[-1, 0] = self.ks[0,0]*self.l_veh/2 - self.ks[0,1]*self.l_veh/2
+        K_ff[-1, 1] = -self.ks[0,0]*self.l_veh/2
+        K_ff[-1, 2] = self.ks[0,1]*self.l_veh/2
+        K_ff[-1, -1] = (self.ks[0,0] + self.ks[0,1]) * (self.l_veh**2) / 4
 
-        C_v[0,-1] = self.cs[0,0]*self.l_veh/2 - self.cs[0,1]*self.l_veh/2
-        C_v[1,-1] = -self.cs[0,0]*self.l_veh/2
-        C_v[2,-1] = self.cs[0,1] * self.l_veh/2
-        C_v[-1, 0] = self.cs[0,0]*self.l_veh/2 - self.cs[0,1]*self.l_veh/2
-        C_v[-1, 1] = -self.cs[0,0]*self.l_veh/2
-        C_v[-1, 2] = self.cs[0,1]*self.l_veh/2
-        C_v[-1, -1] = (self.cs[0,0] + self.cs[0,1]) * (self.l_veh**2) / 4
+        C_ff[0,-1] = self.cs[0,0]*self.l_veh/2 - self.cs[0,1]*self.l_veh/2
+        C_ff[1,-1] = -self.cs[0,0]*self.l_veh/2
+        C_ff[2,-1] = self.cs[0,1] * self.l_veh/2
+        C_ff[-1, 0] = self.cs[0,0]*self.l_veh/2 - self.cs[0,1]*self.l_veh/2
+        C_ff[-1, 1] = -self.cs[0,0]*self.l_veh/2
+        C_ff[-1, 2] = self.cs[0,1]*self.l_veh/2
+        C_ff[-1, -1] = (self.cs[0,0] + self.cs[0,1]) * (self.l_veh**2) / 4
 
-        n = M_v.shape[0]
+        n = M_ff.shape[0]
         idx = np.concatenate(([n-1], np.arange(n-1)))
 
-        M_v = M_v[np.ix_(idx, idx)]
-        C_v = C_v[np.ix_(idx, idx)]
-        K_v= K_v[np.ix_(idx, idx)]
+        M_ff = M_ff[np.ix_(idx, idx)]
+        C_ff = C_ff[np.ix_(idx, idx)]
+        K_ff= K_ff[np.ix_(idx, idx)]
 
-        return (M_v, C_v, K_v)
+        self.K_ff = K_ff
+        self.C_ff = C_ff
+        self.M_ff = M_ff
+
+        # build matrices related to vehicle contact dofs
+        M_cc = np.diag(self.mw)
+        C_cc = np.diag(self.cs[-1])
+        K_cc = np.diag(self.ks[-1])
+
+        M_fc = np.zeros((M_ff.shape[0], M_cc.shape[0]))
+        K_fc = np.zeros_like((M_fc))
+        np.fill_diagonal(K_fc[2:, 2:], -self.ks[-1])
+        C_fc = np.zeros_like(K_fc)
+        np.fill_diagonal(C_fc[2:, 2:], -self.cs[-1])
+
+        M_v = np.block([
+            [M_ff, M_fc],
+            [M_fc.T, M_cc]
+        ])
+
+        C_v = np.block([
+            [C_ff, C_fc],
+            [C_fc.T, C_cc]
+        ])
+
+        K_v = np.block([
+            [K_ff, K_fc],
+            [K_fc.T, K_cc]
+        ])
+
+        self.dof_contact_start = M_ff.shape[0]
+
+        return K_v, C_v, M_v
 
 
     def _get_modes(self):
         try:
-            eigenvals, modes = eigh(self.K, self.M)
+            eigenvals, modes = eigh(self.K_ff, self.M_ff)
         except ValueError as e:
             raise RuntimeError(f'Error computing eigenvalues: {e}')
 
@@ -175,12 +208,12 @@ class VehicleModel:
         # Allocate transfer function magnitude
         H1 = []
 
-        e1 = np.zeros(self.M.shape[0])
+        e1 = np.zeros(self.M_ff.shape[0])
         e1[dof] = 1
 
         for w in omega:
             # Dynamic stiffness matrix
-            Z = -w**2 * self.M + 1j * w * self.C + self.K
+            Z = -w**2 * self.M_ff + 1j * w * self.C_ff + self.K_ff
             H = np.linalg.inv(Z)
             # make sense to sum just if inputs are in phase
             H1.append(np.sum(np.abs(H[dof,2:])))  # |H_11(omega)|
@@ -202,8 +235,9 @@ class VehicleModel:
         # Modes of vehicle extracted as bridge was fixed
         # "Bridge fixed" implies only vehicle modes (no bridge interaction)
 
-        f_ext_v = -9.81 * np.insert(self.ms, 0, 0)
-        xv_eq = np.linalg.solve(self.K, f_ext_v)
+        f_ext_v = np.ones(self.K_ff.shape[0]) * -9.81
+        f_ext_v[0] = 0
+        xv_eq = np.linalg.solve(self.K_ff, f_ext_v)
 
         h_plot = 5
         theta_eq = xv_eq[0]

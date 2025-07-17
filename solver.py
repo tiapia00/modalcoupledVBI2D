@@ -1,7 +1,5 @@
 import numpy as np
 
-import modal
-
 
 def get_fade_weights(ramp_duration, apply_fade: bool, idx_inside: np.ndarray, xc0: np.ndarray, vel: float, t: float, length_b: float) -> np.ndarray:
     fade_weights = np.ones_like(idx_inside)
@@ -25,132 +23,168 @@ def get_fade_weights(ramp_duration, apply_fade: bool, idx_inside: np.ndarray, xc
     return fade_weights
 
 
-def solve_system(U0: np.ndarray,
-                 dotU0: np.ndarray,
-                 ddotU0: np.ndarray,
-                 config: dict):
+class NewmarkSolver:
+    def __init__(self,
+                 alpha: float,
+                 delta: float,
+                 dt: float,
+                 vehicle_matrs: tuple,
+                 n_axles: int,
+                 bridge_matrs: tuple,
+                 ):
+
+        self.alpha = alpha
+        self.delta = delta
+
+        self.dt = dt
+        self.a0 = 1/(self.alpha*self.dt**2)
+        self.a1 = self.delta/(self.alpha*self.dt)
+        self.a2 = 1/(self.alpha*self.dt)
+        self.a3 = 1/(2*self.alpha) - 1
+        self.a4 = self.delta/self.alpha - 1
+        self.a5 = (self.dt*self.delta)/(2*self.alpha) - self.dt
+
+        self.Kv, self.Cv, self.Mv = vehicle_matrs
+        self.n_axles = n_axles
+        self.Kb, self.Cb, self.Mb = bridge_matrs
 
 
-    # Unpacking dict
-    n_modes_b = config["n_modes_b"]
-    n_modes_v = config["n_modes_v"]
-
-    U2modes_contact = config["U2modes_contact"]
-    ks_contact = config["ks_contact"]
-    cs_contact = config["cs_contact"]
-
-    Kv = config["Kv"]
-    Cv = config["Cv"]
-    Mv = config["Mv"]
-
-    wn_b = config["wn_b"]
-
-    alphaR = config["alphaR"]
-    betaR = config["betaR"]
-
-    ms = config["ms"]
-    m_carriage = config["m_carriage"]
-    num_axles = config["num_axles"]
-    mw = config['mw']
-
-    idx_inside = config["idx_inside"]
-
-    vel = config["vel"]
-
-    g = config["g"]
-    dt = config["dt"]
-
-    r_c = config["r_c"]
-    dr_dx_c = config["dr_dx_c"]
-
-    dof_inside = config["dof_inside"]
-    fade_weights = config["fade_weights"]
+    def solve_system(self,
+                     U0: np.ndarray,
+                     dotU0: np.ndarray,
+                     ddotU0: np.ndarray,
+                     config: dict):
 
 
-    # Solver
-    yb0 = U0[:n_modes_b]
-    xv0 = U0[n_modes_b:]
+        # Unpacking dict
+        n_modes_b = config["n_modes_b"]
 
-    dotyb0 = dotU0[:n_modes_b]
-    dotxv0 = dotU0[n_modes_b:]
+        U2modes_contact = config["U2modes_contact"]
 
-    ddotyb0 = ddotU0[:n_modes_b]
-    ddotxv0 = ddotU0[n_modes_b:]
+        # Solver
+        xv0 = U0[:n_modes_b]
+        yb0 = U0[n_modes_b:]
 
-    K_extbridge = np.zeros((n_modes_b, n_modes_b))
-    C_extbridge = np.zeros((n_modes_b, n_modes_b))
-    M_modalw = np.zeros((n_modes_b, n_modes_b))
+        dotxv0 = dotU0[:n_modes_b]
+        dotyb0 = dotU0[n_modes_b:]
 
-    for i in range(len(dof_inside)):
-        modal_trans_matrix = U2modes_contact[i].reshape(-1,1) @ U2modes_contact[i].reshape(1,-1)
-        K_extbridge += ks_contact[i] * modal_trans_matrix
-        C_extbridge += cs_contact[i] * modal_trans_matrix
-        M_modalw += mw[i] * modal_trans_matrix
+        ddotxv0 = ddotU0[:n_modes_b]
+        ddotyb0 = ddotU0[n_modes_b:]
 
-    Kb = np.diag(wn_b**2) + K_extbridge
-    Mb = np.eye(n_modes_b) + M_modalw
-    Cb = alphaR*np.eye(n_modes_b) + betaR*np.diag(wn_b**2)
-    Kbb = Kb + 2/dt*(Cb + C_extbridge) + 4/dt**2*Mb
+        # wheel location matrix
+        # modify this based on the entrance condition
+        I_v = np.zeros((self.Kv.shape[0], self.n_axles))
+        I_v[I_v.shape[0] - self.n_axles:, :self.n_axles] = np.eye(self.n_axles)
 
-    Kbv = np.zeros((n_modes_b, n_modes_v))
-    # broadcasting
-    Kbv[:,dof_inside] += -(U2modes_contact * ks_contact.reshape(-1,1)).T
-    Kbv[:,dof_inside] += -2/dt*(U2modes_contact * cs_contact.reshape(-1,1)).T
+        Keff_v = self.Kv + self.a0*self.Mv + self.a1*self.Cv
 
-    Kvb = np.zeros((n_modes_v, n_modes_b))
-    Kvb[dof_inside,:] += -ks_contact.reshape(-1,1) * U2modes_contact
-    Kvb[dof_inside,:] += -2/dt * cs_contact.reshape(-1,1) * U2modes_contact
-    Kvv =  Kv + 2/dt*Cv + 4/dt**2*Mv
+        inv_Keff_v, alpha_1 = self.get_alpha(Keff_v, I_v)
+        beta_1 = self.get_beta(inv_Keff_v, xv0, dotxv0, ddotxv0)
 
-    Keff = np.block([
-            [Kbb, Kbv],
-            [Kvb, Kvv]
-    ])
+        Keff_b = self.Kb + self.a0 * self.Mb + self.a1 * self.Cb
 
-    mass_per_axle = ms[1+idx_inside] + m_carriage/num_axles + mw[idx_inside]
+        inv_Keff_b, alpha_2 = self.get_alpha(Keff_b, U2modes_contact)
+        beta_2 = self.get_beta(inv_Keff_b, yb0, dotyb0, ddotyb0)
 
-    fb = np.zeros(n_modes_b)
+        alpha = np.concatenate((alpha_1, alpha_2))
+        beta = np.concatenate((beta_1, beta_2))
 
-    # === Apply fade ONLY to gravity ===
-    gravity_term = -(mass_per_axle * g * fade_weights).reshape(-1, 1)
-    fb += np.sum(U2modes_contact * gravity_term, axis=0)
+        A = np.concatenate((-I_v, U2modes_contact), axis=0)
 
-    # === No fade on spring/damper terms ===
-    spring_damper_term = (ks_contact * r_c + cs_contact * vel * dr_dx_c).reshape(-1,1)
-    fb += -np.sum(U2modes_contact * spring_damper_term, axis=0)
+        """
+        reduce the size of this system
+        for the DOFs outside: no LCP, pure contact
+        for the DOFs inside: LCP
 
-    fbM = (4/dt**2*yb0 + 4/dt * dotyb0 + ddotyb0)
-    fbM = fbM.reshape(-1,1)
-    fb += (Mb @ fbM).squeeze()
+        Easiest thing would be to set modes outisde the bridge = 0 whatever
+        and then solve car
+        """
 
-    fbC = 2/dt*yb0 + dotyb0 + dt/2 * ddotyb0
-    fbC = fbC.reshape(-1,1)
-    fb += (Cb @ fbC).squeeze()
-    # contribution to feff related to dashpot - bridge on bridge
-    fb += (C_extbridge @
-            (2/dt*yb0 + dotyb0 + dt/2 * ddotyb0).reshape(-1,1)).squeeze()
-    # contribution to feff related to dashpot - vehicle on bridge
-    fb += -((U2modes_contact * cs_contact.reshape(-1,1)).T @ (
-            2/dt * xv0[dof_inside] + dotxv0[dof_inside] + dt/2 * ddotxv0[dof_inside]).reshape(-1,1)).squeeze()
+        # i'll exclude the dofs outisde from the LCP and keep both at 0 relative displacement
+        A_LCP = np.eye(len(dof_inside)) + A.T @ alpha
+        #B_LCP = A.T @ beta - self.rough - self.eq_virtual_spring
+        B_LCP = A.T @ beta
 
-    fv = np.zeros(n_modes_v)
-    fv[idx_inside] += ks_contact * r_c + cs_contact * vel * dr_dx_c
-    fvM = (4/dt**2*xv0 + 4/dt * dotxv0 + ddotxv0)
-    fvM = fvM.reshape(-1,1)
-    fv += (Mv @ fvM).squeeze()
+        lambdas = self.projected_gauss_seidel(A_LCP, B_LCP)
 
-    fvC = 2/dt*xv0 + dotxv0 + dt/2 * ddotxv0
-    fvC = fvC.reshape(-1,1)
-    fv += (Cv @ fvC).squeeze()
-    # contribution to feff related to dashpot - bridge on vehicle
-    fv[dof_inside] += -((U2modes_contact * cs_contact.reshape(-1,1)) @ (
-            2/dt*yb0 + dotyb0 + dt/2 * ddotyb0).reshape(-1,1)).squeeze()
+        U = alpha @ lambdas + beta
+        ddotU = self.update_acc(U, U0, dotU0, ddotU0)
+        dotU = self.update_speed(ddotU, dotU0, ddotU0)
 
-    feff = np.concatenate((fb, fv))
+        return U, dotU, ddotU
 
-    U = np.linalg.solve(Keff, feff)
 
-    ddotU = 4/dt**2*(U - U0) - 4/dt*dotU0 - ddotU0
-    dotU = dotU0 + dt/2*(ddotU0 + ddotU)
+    def get_alpha(self, Keff: np.ndarray, right_term: np.ndarray) -> tuple:
+        inv_Keff = np.linalg.inv(Keff)
+        alpha = inv_Keff @ right_term
+        return inv_Keff, alpha
 
-    return U, dotU, ddotU
+
+    def get_beta(self,
+                 inv_Keff: np.ndarray,
+                 displ: np.ndarray,
+                 vel: np.ndarray,
+                 acc: np.ndarray) -> np.ndarray:
+
+        beta = inv_Keff @ (self.Mv @ (self.a0 * displ + self.a2 * vel + self.a3 * acc) +
+                self.Cv @ (self.a1 * displ + self.a4 * vel + self.a5 * acc))
+
+        return beta
+
+
+    @staticmethod
+    def projected_gauss_seidel(M, q, x0=None, max_iter=1000, tol=1e-8):
+        """
+        Solves the LCP: x >= 0, Mx + q >= 0, x^T (Mx + q) = 0
+        using Projected Gauss-Seidel iteration.
+
+        Parameters
+        ----------
+        M : (n, n) array_like
+            Positive definite or positive semidefinite matrix.
+        q : (n,) array_like
+            Vector in the LCP.
+        x0 : (n,) array_like, optional
+            Initial guess. Defaults to zeros.
+        max_iter : int
+            Maximum number of iterations.
+        tol : float
+            Convergence tolerance.
+
+        Returns
+        -------
+        x : (n,) ndarray
+            Solution to the LCP.
+        """
+
+        M = np.array(M, dtype=float)
+        q = np.array(q, dtype=float)
+        n = len(q)
+
+        if x0 is None:
+            x = np.zeros(n)
+        else:
+            x = np.array(x0, dtype=float)
+
+        for _ in range(max_iter):
+            x_old = x.copy()
+            for i in range(n):
+                # Standard Gauss-Seidel update
+                sigma = np.dot(M[i, :], x) - M[i, i] * x[i]
+                x[i] = max(0.0, (-q[i] - sigma) / M[i, i])  # projection onto positive orthant
+
+            # Check convergence (can use norm or max norm)
+            if np.linalg.norm(x - x_old, ord=np.inf) < tol:
+                break
+
+        return x
+
+
+    def update_acc(self, U: np.ndarray, U0: np.ndarray, dotU0: np.ndarray, ddotU0: np.ndarray):
+        acc = self.a0*(U - U0) - self.a2*dotU0 - self.a3*ddotU0
+        return acc
+
+
+    def update_speed(self, ddotU: np.ndarray, dotU0: np.ndarray, ddotU0: np.ndarray):
+        speed = dotU0 + self.delta*self.dt*ddotU + (1 - self.delta)*self.dt*ddotU0
+        return speed
