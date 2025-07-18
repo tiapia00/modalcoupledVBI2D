@@ -32,7 +32,7 @@ h_veh = 0.5
 
 m_carriage = 3e3
 m_axles = [3e2, 3e2]
-mw = np.array([0, 0])
+mw = np.array([3e1, 3e1])
 ms = np.array([m_carriage] + m_axles) # Vehicle weights
 mtot = sum(ms)
 
@@ -48,9 +48,12 @@ ks_last = ks[-1]
 cs_last = cs[-1]
 num_axles = ks.shape[1]
 
+k_contact = 5e-10
+
 vehicle = VehicleModel(ms, mw, cs, ks, l_veh, J_rot, include_pitch=True)
 vehicle.plot_modes()
 vehicle.plot_TF(50, 1)
+x0 = vehicle.get_displ_contact_springs(k_contact)
 n_dof_vehicle = vehicle.M.shape[0]
 wn_v = np.sqrt(vehicle.eigenvals)
 np.savetxt('vehicle_freqs.txt', wn_v, fmt='%.3f')
@@ -134,7 +137,7 @@ x_v = np.zeros((n_dof_vehicle, time.shape[0]))
 xdot_v = np.zeros_like(x_v)
 xddot_v = np.zeros_like(x_v)
 
-U2modes_interp = CubicSpline(x, U2_modes, axis=0)
+U2modes_interp = CubicSpline(x, U2_modes, axis=0, extrapolate=False)
 
 # y_b and y_b_dot: modal coordinates
 y_b = np.zeros((n_steps, n_modes_b))
@@ -186,20 +189,28 @@ Kb = wn_b**2 * Mb
 Cb = alphaR * Mb + betaR * Kb
 
 bridge_matrs = (Kb, Cb, Mb)
-solver = NewmarkSolver(1/4, 1/2, dt, vehicle_matrs, num_axles, bridge_matrs)
+dof_contact_start = vehicle.dof_contact_start
+
+mass_per_axle = np.array(m_axles) + m_carriage/num_axles
+solver = NewmarkSolver(1/4,
+                       1/2,
+                       dt,
+                       vehicle_matrs,
+                       num_axles,
+                       bridge_matrs,
+                       dof_contact_start,
+                       x0,
+                       mass_per_axle)
+
+def zero_outside_interp(cs, x_query):
+    y = cs(x_query)
+    y = np.nan_to_num(y, nan=0.0)  # replaces NaN with 0
+    return y
 
 for i in range(1, n_steps):
     t = time[i]
 
     x_c = xc0 + vel * t
-    mask = (x_c >= 0) & (x_c <= length_b)
-    x_c = x_c[mask]
-    idx_inside = np.where(mask)[0]
-    dof_inside = startdofcontact + idx_inside
-
-    ks_contact = ks_last[idx_inside]
-    cs_contact = cs_last[idx_inside]
-
     ramp_duration = 3*dt
     apply_fade = False
 
@@ -209,18 +220,9 @@ for i in range(1, n_steps):
     dotU0 = dotU
     ddotU0 = ddotU
 
-    U2modes_contact = U2modes_interp(x_c).reshape(len(dof_inside),-1)
+    U2modes_contact = zero_outside_interp(U2modes_interp, x_c)
 
-    config = {
-        "n_modes_b": n_modes_b,
-
-        "U2modes_contact": U2modes_contact,  # shape: (num_contact_dofs, n_modes_b)
-
-        # interaction vehicle dofs
-        "dof_inside": dof_inside
-    }
-
-    U, dotU, ddotU = solver.solve_system(U0, dotU0, ddotU0, config)
+    U, dotU, ddotU = solver.solve_system(U0, dotU0, ddotU0, n_modes_b, U2modes_contact, r_c)
 
     ybt = U[:n_modes_b]
     ydot_bt = dotU[:n_modes_b]
@@ -232,8 +234,7 @@ for i in range(1, n_steps):
     U2_t = modal_to_natural_global(ybt)
 
     U2_contact = np.empty(num_axles)
-    U2_contact[:] = np.nan
-    U2_contact[idx_inside] = modal_to_natural_contact(U2modes_contact, ybt).squeeze()
+    U2_contact = modal_to_natural_contact(U2modes_contact, ybt).squeeze()
 
     U2[:, i] = U2_t
     U2_contacts[:,i] = U2_contact
@@ -250,7 +251,6 @@ for i in range(1, n_steps):
     fsi_contact[:] = np.nan
     fsi_contact[idx_inside] = get_contact_car(U2modes_contact, ybt, xv_t[dof_inside], r_c)
 
-    mass_per_axle = np.array(m_axles) + m_carriage/num_axles
 
     fsi_contact += - mass_per_axle*g
     force_contact[:,i] = fsi_contact

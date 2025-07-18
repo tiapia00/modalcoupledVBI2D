@@ -19,6 +19,8 @@ class VehicleModel:
 
         self.eigenvals, self.modes = self._get_modes()
 
+        self.g = 9.81
+
 
     def build_matrices(self):
         if self.include_pitch:
@@ -189,6 +191,18 @@ class VehicleModel:
 
         return K_v, C_v, M_v
 
+
+    def get_displ_contact_springs(self, k_contact: float):
+        K = self.K.copy()
+
+        K_dofcontact = K[-self.n_axles:, -self.n_axles:]
+        np.fill_diagonal(K_dofcontact, np.diag(K_dofcontact) + k_contact)
+        f = - np.diag(self.M)[1:] * self.g
+        f = np.insert(f, 0, 0)
+
+        x0 = np.linalg.solve(K, f)
+
+        return -x0[-self.n_axles:]
 
     def _get_modes(self):
         try:

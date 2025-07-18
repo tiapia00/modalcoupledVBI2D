@@ -31,7 +31,9 @@ class NewmarkSolver:
                  vehicle_matrs: tuple,
                  n_axles: int,
                  bridge_matrs: tuple,
-                 ):
+                 dof_contact_start: int,
+                 x0: np.ndarray,
+                 mass_per_axle: np.ndarray):
 
         self.alpha = alpha
         self.delta = delta
@@ -47,67 +49,61 @@ class NewmarkSolver:
         self.Kv, self.Cv, self.Mv = vehicle_matrs
         self.n_axles = n_axles
         self.Kb, self.Cb, self.Mb = bridge_matrs
+        self.dof_contact_start = dof_contact_start
+
+        self.x0 = x0
+        self.mass_per_axle = mass_per_axle
 
 
     def solve_system(self,
                      U0: np.ndarray,
                      dotU0: np.ndarray,
                      ddotU0: np.ndarray,
-                     config: dict):
+                     n_modes_b: int,
+                     U2modes_contact: np.ndarray,
+                     rough: np.ndarray):
 
-
-        # Unpacking dict
-        n_modes_b = config["n_modes_b"]
-
-        U2modes_contact = config["U2modes_contact"]
 
         # Solver
-        xv0 = U0[:n_modes_b]
-        yb0 = U0[n_modes_b:]
+        yb0 = U0[:n_modes_b]
+        xv0 = U0[n_modes_b:]
 
-        dotxv0 = dotU0[:n_modes_b]
-        dotyb0 = dotU0[n_modes_b:]
+        dotyb0 = dotU0[:n_modes_b]
+        dotxv0 = dotU0[n_modes_b:]
 
-        ddotxv0 = ddotU0[:n_modes_b]
-        ddotyb0 = ddotU0[n_modes_b:]
+        ddotyb0 = ddotU0[:n_modes_b]
+        ddotxv0 = ddotU0[n_modes_b:]
 
         # wheel location matrix
-        # modify this based on the entrance condition
         I_v = np.zeros((self.Kv.shape[0], self.n_axles))
         I_v[I_v.shape[0] - self.n_axles:, :self.n_axles] = np.eye(self.n_axles)
 
         Keff_v = self.Kv + self.a0*self.Mv + self.a1*self.Cv
 
         inv_Keff_v, alpha_1 = self.get_alpha(Keff_v, I_v)
-        beta_1 = self.get_beta(inv_Keff_v, xv0, dotxv0, ddotxv0)
+        beta_1 = self.get_beta_vehicle(inv_Keff_v, xv0, dotxv0, ddotxv0)
 
         Keff_b = self.Kb + self.a0 * self.Mb + self.a1 * self.Cb
 
-        inv_Keff_b, alpha_2 = self.get_alpha(Keff_b, U2modes_contact)
-        beta_2 = self.get_beta(inv_Keff_b, yb0, dotyb0, ddotyb0)
+        inv_Keff_b, alpha_2 = self.get_alpha(Keff_b, U2modes_contact.T)
+        beta_2 = self.get_beta_bridge(inv_Keff_b, yb0, dotyb0, ddotyb0)
 
-        alpha = np.concatenate((alpha_1, alpha_2))
-        beta = np.concatenate((beta_1, beta_2))
+        alpha = np.concatenate((alpha_2, alpha_1))
+        beta = np.concatenate((beta_2, beta_1))
 
-        A = np.concatenate((-I_v, U2modes_contact), axis=0)
+        A = np.concatenate((U2modes_contact.T, -I_v), axis=0)
 
-        """
-        reduce the size of this system
-        for the DOFs outside: no LCP, pure contact
-        for the DOFs inside: LCP
-
-        Easiest thing would be to set modes outisde the bridge = 0 whatever
-        and then solve car
-        """
-
-        # i'll exclude the dofs outisde from the LCP and keep both at 0 relative displacement
-        A_LCP = np.eye(len(dof_inside)) + A.T @ alpha
-        #B_LCP = A.T @ beta - self.rough - self.eq_virtual_spring
-        B_LCP = A.T @ beta
+        # reduce size of LCP excluding dofs outside
+        A_LCP = np.eye(self.n_axles) + A.T @ alpha
+        B_LCP = A.T @ beta - rough - self.x0
 
         lambdas = self.projected_gauss_seidel(A_LCP, B_LCP)
+        detach_indices = np.where(lambdas == 0)[0]
 
         U = alpha @ lambdas + beta
+        weight_v_contr = - 9.81 * U2modes_contact.T @ self.mass_per_axle
+
+        U[:n_modes_b] += weight_v_contr
         ddotU = self.update_acc(U, U0, dotU0, ddotU0)
         dotU = self.update_speed(ddotU, dotU0, ddotU0)
 
@@ -120,14 +116,25 @@ class NewmarkSolver:
         return inv_Keff, alpha
 
 
-    def get_beta(self,
-                 inv_Keff: np.ndarray,
+    def get_beta_vehicle(self,
+                 inv_Keff_v: np.ndarray,
                  displ: np.ndarray,
                  vel: np.ndarray,
                  acc: np.ndarray) -> np.ndarray:
 
-        beta = inv_Keff @ (self.Mv @ (self.a0 * displ + self.a2 * vel + self.a3 * acc) +
+        beta = inv_Keff_v @ (self.Mv @ (self.a0 * displ + self.a2 * vel + self.a3 * acc) +
                 self.Cv @ (self.a1 * displ + self.a4 * vel + self.a5 * acc))
+
+        return beta
+
+    def get_beta_bridge(self,
+                 inv_Keff_b: np.ndarray,
+                 displ: np.ndarray,
+                 vel: np.ndarray,
+                 acc: np.ndarray) -> np.ndarray:
+
+        beta = inv_Keff_b @ (self.Mb @ (self.a0 * displ + self.a2 * vel + self.a3 * acc) +
+                self.Cb @ (self.a1 * displ + self.a4 * vel + self.a5 * acc))
 
         return beta
 
