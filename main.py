@@ -48,7 +48,7 @@ ks_last = ks[-1]
 cs_last = cs[-1]
 num_axles = ks.shape[1]
 
-k_contact = 5e-10
+k_contact = 5e-3
 
 vehicle = VehicleModel(ms, mw, cs, ks, l_veh, J_rot, include_pitch=True)
 vehicle.plot_modes()
@@ -144,8 +144,6 @@ y_b = np.zeros((n_steps, n_modes_b))
 y_b_dot = np.zeros((n_steps, n_modes_b))
 
 force_contact = np.empty((num_axles, len(time)))
-force_contact[:] = np.nan
-force_contact[0,0] = -(ms[1] + m_carriage/num_axles) * g
 
 U2 = np.zeros((U2_modes.shape[0], len(time)))
 U2_contacts = np.zeros((num_axles, len(time)))
@@ -192,6 +190,14 @@ bridge_matrs = (Kb, Cb, Mb)
 dof_contact_start = vehicle.dof_contact_start
 
 mass_per_axle = np.array(m_axles) + m_carriage/num_axles
+
+"""
+k_contact for each axle, even if outside:
+uniform stiffness of road pavement
+even outside the bridge
+fact that is still is provided by U2modes_contact = 0
+"""
+
 solver = NewmarkSolver(1/4,
                        1/2,
                        dt,
@@ -200,7 +206,8 @@ solver = NewmarkSolver(1/4,
                        bridge_matrs,
                        dof_contact_start,
                        x0,
-                       mass_per_axle)
+                       mass_per_axle,
+                       k_contact)
 
 def zero_outside_interp(cs, x_query):
     y = cs(x_query)
@@ -211,6 +218,9 @@ for i in range(1, n_steps):
     t = time[i]
 
     x_c = xc0 + vel * t
+    mask = (x_c < 0) | (x_c > length_b)
+    idx_outside = np.where(mask)[0]
+
     ramp_duration = 3*dt
     apply_fade = False
 
@@ -222,7 +232,7 @@ for i in range(1, n_steps):
 
     U2modes_contact = zero_outside_interp(U2modes_interp, x_c)
 
-    U, dotU, ddotU = solver.solve_system(U0, dotU0, ddotU0, n_modes_b, U2modes_contact, r_c)
+    U, dotU, ddotU, force_virtual = solver.solve_system(U0, dotU0, ddotU0, n_modes_b, U2modes_contact, r_c, idx_outside)
 
     ybt = U[:n_modes_b]
     ydot_bt = dotU[:n_modes_b]
@@ -234,6 +244,8 @@ for i in range(1, n_steps):
     U2_t = modal_to_natural_global(ybt)
 
     U2_contact = np.empty(num_axles)
+    # check U2_contact, why at the beginning is 0?
+
     U2_contact = modal_to_natural_contact(U2modes_contact, ybt).squeeze()
 
     U2[:, i] = U2_t
@@ -246,28 +258,32 @@ for i in range(1, n_steps):
     y_b[i] = ybt
     y_b_dot[i] = ydot_bt
 
-    """
-    fsi_contact = np.empty(num_axles)
-    fsi_contact[:] = np.nan
-    fsi_contact[idx_inside] = get_contact_car(U2modes_contact, ybt, xv_t[dof_inside], r_c)
+    fsi_contact = force_virtual + mass_per_axle * -9.81
 
-
-    fsi_contact += - mass_per_axle*g
     force_contact[:,i] = fsi_contact
-    """
 
-# Plots
+
+idx_start_contact = np.floor(-xc0/vel/dt)
+idx_end_contact = np.floor(idx_start_contact + length_b/vel/dt)
+idx_start_end_contact = np.stack((idx_start_contact, idx_end_contact), axis=-1)
+
 idx_axle_plot = 1
+
+idx_start = int(idx_start_end_contact[idx_axle_plot, 0])
+if idx_start == 0:
+    idx_start += 1
+idx_end = int(idx_start_end_contact[idx_axle_plot, 1])
+
 logging.info('ERRORS')
 plt.figure()
 y = force_contact[idx_axle_plot]
-plt.plot(time, y)
+plt.plot(time[idx_start:idx_end], y[idx_start:idx_end])
 plt.xlabel(r'$t$')
 plt.ylabel(r'$F_c$')
 plt.title('Contact force')
 plt.show()
 
-dofv = 1
+dofv = startdofcontact
 dofv_matlab = 0
 
 plt.figure('Vehicle')
@@ -292,7 +308,7 @@ plt.title('Acceleration')
 plt.tight_layout()
 plt.show()
 
-plt.plot(time, U2_contacts[idx_axle_plot])
+plt.plot(time[idx_start:idx_end], U2_contacts[idx_axle_plot, idx_start:idx_end])
 plt.xlabel(r'$t$')
 plt.ylabel(r'$x_c$')
 plt.gca().ticklabel_format(axis='y', style='sci', scilimits=(0, 0))
@@ -302,7 +318,7 @@ plt.show()
 vel_contact = np.gradient(U2_contacts[idx_axle_plot], time)
 acc_contact = np.gradient(vel_contact, time)
 
-plt.plot(time, acc_contact)
+plt.plot(time[idx_start:idx_end], acc_contact[idx_start:idx_end])
 plt.xlabel(r'$t$')
 plt.ylabel(r'$a_c$')
 plt.gca().ticklabel_format(axis='y', style='sci', scilimits=(0, 0))

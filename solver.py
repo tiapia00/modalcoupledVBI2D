@@ -1,4 +1,5 @@
 import numpy as np
+from itertools import combinations
 
 
 def get_fade_weights(ramp_duration, apply_fade: bool, idx_inside: np.ndarray, xc0: np.ndarray, vel: float, t: float, length_b: float) -> np.ndarray:
@@ -33,7 +34,8 @@ class NewmarkSolver:
                  bridge_matrs: tuple,
                  dof_contact_start: int,
                  x0: np.ndarray,
-                 mass_per_axle: np.ndarray):
+                 mass_per_axle: np.ndarray,
+                 stiff_contact: float):
 
         self.alpha = alpha
         self.delta = delta
@@ -53,6 +55,7 @@ class NewmarkSolver:
 
         self.x0 = x0
         self.mass_per_axle = mass_per_axle
+        self.stiff_contact = stiff_contact
 
 
     def solve_system(self,
@@ -61,7 +64,8 @@ class NewmarkSolver:
                      ddotU0: np.ndarray,
                      n_modes_b: int,
                      U2modes_contact: np.ndarray,
-                     rough: np.ndarray):
+                     rough: np.ndarray,
+                     idx_outside: np.ndarray):
 
 
         # Solver
@@ -93,21 +97,29 @@ class NewmarkSolver:
 
         A = np.concatenate((U2modes_contact.T, -I_v), axis=0)
 
-        # reduce size of LCP excluding dofs outside
         A_LCP = np.eye(self.n_axles) + A.T @ alpha
+        is_p = is_p_matrix(A_LCP)
+        if not is_p:
+            raise RuntimeError("M is not a P-matrix: LCP solution not unique")
+
         B_LCP = A.T @ beta - rough - self.x0
 
+        # lambda: compression variable
         lambdas = self.projected_gauss_seidel(A_LCP, B_LCP)
-        detach_indices = np.where(lambdas == 0)[0]
 
-        U = alpha @ lambdas + beta
+        # At equilibrium, reaction force must be 0 outside, otherwise I would have a response
+        lambdas[idx_outside] = 0
+
+        forces_contact = self.stiff_contact * - lambdas
+
+        U = alpha @ forces_contact + beta
         weight_v_contr = - 9.81 * U2modes_contact.T @ self.mass_per_axle
+        U[:n_modes_b] += inv_Keff_b @ weight_v_contr
 
-        U[:n_modes_b] += weight_v_contr
         ddotU = self.update_acc(U, U0, dotU0, ddotU0)
         dotU = self.update_speed(ddotU, dotU0, ddotU0)
 
-        return U, dotU, ddotU
+        return U, dotU, ddotU, forces_contact
 
 
     def get_alpha(self, Keff: np.ndarray, right_term: np.ndarray) -> tuple:
@@ -195,3 +207,36 @@ class NewmarkSolver:
     def update_speed(self, ddotU: np.ndarray, dotU0: np.ndarray, ddotU0: np.ndarray):
         speed = dotU0 + self.delta*self.dt*ddotU + (1 - self.delta)*self.dt*ddotU0
         return speed
+
+
+def is_p_matrix(M: np.ndarray, tol=1e-12):
+
+    """
+    Check if a square matrix M is a P-matrix
+    (all principal minors are strictly positive).
+
+    Parameters
+    ----------
+    M : (n, n) array_like
+        The matrix to test.
+    tol : float
+        Numerical tolerance for considering positivity.
+
+    Returns
+    -------
+    bool : True if M is a P-matrix, False otherwise.
+    """
+    M = np.array(M, dtype=float)
+    n = M.shape[0]
+
+    if M.shape[0] != M.shape[1]:
+        raise ValueError("M must be a square matrix")
+
+    # Loop over all sizes of principal minors (1x1, 2x2, ..., nxn)
+    for k in range(1, n + 1):
+        for rows in combinations(range(n), k):
+            submatrix = M[np.ix_(rows, rows)]
+            det_val = np.linalg.det(submatrix)
+            if det_val <= tol:  # strictly positive required
+                return False
+    return True
